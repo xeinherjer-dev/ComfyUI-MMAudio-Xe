@@ -3,8 +3,8 @@
 import torch
 import torch.nn as nn
 import torchaudio
+import torchaudio.functional as F
 from einops import rearrange
-from librosa.filters import mel as librosa_mel_fn
 
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5, norm_fn=torch.log10):
@@ -40,12 +40,15 @@ class STFTConverter(nn.Module):
         self.fmax = fmax
         self.norm_fn = norm_fn
 
-        mel = librosa_mel_fn(sr=self.sampling_rate,
-                             n_fft=self.n_fft,
-                             n_mels=self.num_mels,
-                             fmin=self.fmin,
-                             fmax=self.fmax)
-        mel_basis = torch.from_numpy(mel).float()
+        mel_basis = F.melscale_fbanks(
+            n_freqs=(self.n_fft // 2 + 1),
+            f_min=self.fmin,
+            f_max=self.fmax,
+            n_mels=self.num_mels,
+            sample_rate=self.sampling_rate,
+            norm='slaney',
+            mel_scale='htk'
+        ).T.float()
         hann_window = torch.hann_window(self.win_size)
 
         self.register_buffer('mel_basis', mel_basis)
