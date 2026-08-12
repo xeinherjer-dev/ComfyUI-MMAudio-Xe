@@ -334,7 +334,6 @@ class MMAudioSampler:
                 "prompt": ("STRING", {"default": "", "multiline": True} ),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True} ),
                 "mask_away_clip": ("BOOLEAN", {"default": False, "tooltip": "If true, the clip video will be masked away"}),
-                "force_offload": ("BOOLEAN", {"default": True, "tooltip": "If true, the model will be offloaded to the offload device"}),
             },
             "optional": {
                 "images": ("IMAGE",),
@@ -346,13 +345,13 @@ class MMAudioSampler:
     FUNCTION = "sample"
     CATEGORY = "MMAudio"
 
-    def sample(self, mmaudio_model, seed, feature_utils, duration, steps, cfg, prompt, negative_prompt, mask_away_clip, force_offload, images=None):
+    def sample(self, mmaudio_model, seed, feature_utils, duration, steps, cfg, prompt, negative_prompt, mask_away_clip, images=None):
         """
         - Uses seq_cfg to derive the *token* lengths the model expects.
         - Resamples frames so CLIP tokens == seq_cfg.clip_seq_len,
         and SYNC TOKENS == seq_cfg.sync_seq_len (by feeding +8 raw frames).
         - Calls update_seq_lengths with the SAME lengths to avoid asserts.
-        - JIT-moves models to GPU; offloads after.
+        - JIT-moves models to GPU; automatically offloads based on ComfyUI vram_state.
         """
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -398,8 +397,9 @@ class MMAudioSampler:
             target_sync_tokens           # SYNC tokens
         )
 
-        # 4) Scheduler + JIT device placement
+        # 4) Scheduler + JIT device placement with ComfyUI memory preparation
         scheduler = FlowMatching(min_sigma=0, inference_mode='euler', num_steps=steps)
+        mm.free_memory(2000 * 1024 * 1024, device)
         feature_utils.to(device)
         mmaudio_model.to(device)
 
@@ -416,8 +416,8 @@ class MMAudioSampler:
             cfg_strength=cfg,
         )
 
-        # 6) Offload if requested
-        if force_offload:
+        # 6) Automatic Offload based on ComfyUI's vram_state (offloads unless HIGH_VRAM is forced)
+        if mm.vram_state != mm.VRAMState.HIGH_VRAM:
             mmaudio_model.to(offload_device)
             feature_utils.to(offload_device)
             mm.soft_empty_cache()
