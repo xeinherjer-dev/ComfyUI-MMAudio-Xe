@@ -258,7 +258,7 @@ class MMAudioFeatureUtilsLoader:
         
         for name, param in synchformer.named_parameters():
             # Set tensor to device
-            set_module_tensor_to_device(synchformer, name, device=device, dtype=dtype, value=synchformer_sd[name])
+            set_module_tensor_to_device(synchformer, name, device=offload_device, dtype=dtype, value=synchformer_sd[name])
 
         #vae
         download_path = folder_paths.get_folder_paths("mmaudio")[0]
@@ -276,7 +276,7 @@ class MMAudioFeatureUtilsLoader:
                     local_dir_use_symlinks=False,
                 )
             
-            bigvgan_vocoder = BigVGANv2.from_pretrained(nvidia_bigvgan_vocoder_path).eval().to(device=device, dtype=dtype)
+            bigvgan_vocoder = BigVGANv2.from_pretrained(nvidia_bigvgan_vocoder_path).eval().to(device=offload_device, dtype=dtype)
         else:
             assert bigvgan_vocoder_model is not None, "bigvgan_vocoder_model must be provided for 16k mode"
             bigvgan_vocoder = bigvgan_vocoder_model
@@ -288,7 +288,7 @@ class MMAudioFeatureUtilsLoader:
             bigvgan_vocoder=bigvgan_vocoder,
             mode=mode
             )
-        vae = vae.eval().to(device=device, dtype=dtype)
+        vae = vae.eval().to(device=offload_device, dtype=dtype)
 
         #clip
        
@@ -307,8 +307,8 @@ class MMAudioFeatureUtilsLoader:
 
         clip_sd = load_torch_file(os.path.join(clip_model_path), device=offload_device)
         for name, param in clip_model.named_parameters():
-            set_module_tensor_to_device(clip_model, name, device=device, dtype=dtype, value=clip_sd[name])
-        clip_model.to(device=device, dtype=dtype)
+            set_module_tensor_to_device(clip_model, name, device=offload_device, dtype=dtype, value=clip_sd[name])
+        clip_model.to(device=offload_device, dtype=dtype)
 
         #clip_model = create_model_from_pretrained("hf-hub:apple/DFN5B-CLIP-ViT-H-14-384", return_transform=False)
         
@@ -403,24 +403,25 @@ class MMAudioSampler:
         feature_utils.to(device)
         mmaudio_model.to(device)
 
-        # 5) Generate
-        audios = generate(
-            clip_frames,
-            sync_frames,
-            [prompt],
-            negative_text=[negative_prompt],
-            feature_utils=feature_utils,
-            net=mmaudio_model,
-            fm=scheduler,
-            rng=rng,
-            cfg_strength=cfg,
-        )
-
-        # 6) Automatic Offload based on ComfyUI's vram_state (offloads unless HIGH_VRAM is forced)
-        if mm.vram_state != mm.VRAMState.HIGH_VRAM:
-            mmaudio_model.to(offload_device)
-            feature_utils.to(offload_device)
-            mm.soft_empty_cache()
+        try:
+            # 5) Generate
+            audios = generate(
+                clip_frames,
+                sync_frames,
+                [prompt],
+                negative_text=[negative_prompt],
+                feature_utils=feature_utils,
+                net=mmaudio_model,
+                fm=scheduler,
+                rng=rng,
+                cfg_strength=cfg,
+            )
+        finally:
+            # 6) Automatic Offload based on ComfyUI's vram_state (offloads unless HIGH_VRAM is forced)
+            if mm.vram_state != mm.VRAMState.HIGH_VRAM:
+                mmaudio_model.to(offload_device)
+                feature_utils.to(offload_device)
+                mm.soft_empty_cache()
 
         waveform = audios.float().cpu()
         return ({"waveform": waveform, "sample_rate": 44100},)
