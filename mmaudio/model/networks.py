@@ -352,6 +352,10 @@ class MMAudio(nn.Module):
     def device(self) -> torch.device:
         return self.latent_mean.device
 
+    @device.setter
+    def device(self, value):
+        pass
+
     @property
     def latent_seq_len(self) -> int:
         return self._latent_seq_len

@@ -150,6 +150,14 @@ class FeaturesUtils(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
+    @device.setter
+    def device(self, value):
+        pass
+
     @property
     def dtype(self):
         return next(self.parameters()).dtype
+
+    @dtype.setter
+    def dtype(self, value):
+        pass

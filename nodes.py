@@ -7,6 +7,7 @@ from accelerate.utils import set_module_tensor_to_device
 
 import folder_paths
 import comfy.model_management as mm
+import comfy.model_patcher
 from comfy.utils import load_torch_file
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -73,16 +74,16 @@ def process_video_tensor(
     clip_transform = v2.Compose([
         v2.Resize((_CLIP_SIZE, _CLIP_SIZE), interpolation=v2.InterpolationMode.BICUBIC),
         v2.ToPILImage(),
-        v2.ToTensor(),
-        v2.ConvertImageDtype(torch.float32),
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
     ])
 
     sync_transform = v2.Compose([
         v2.Resize(_SYNC_SIZE, interpolation=v2.InterpolationMode.BICUBIC),
         v2.CenterCrop(_SYNC_SIZE),
         v2.ToPILImage(),
-        v2.ToTensor(),
-        v2.ConvertImageDtype(torch.float32),
+        v2.ToImage(),
+        v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
 
@@ -197,7 +198,8 @@ class MMAudioModelLoader:
         elif "16" in mmaudio_model:
             model.seq_cfg = CONFIG_16K
         
-        return (model,)
+        patcher = comfy.model_patcher.ModelPatcher(model, load_device=device, offload_device=offload_device)
+        return (patcher,)
     
 #region Features Utils
 class MMAudioVoCoderLoader:
@@ -317,6 +319,7 @@ class MMAudioFeatureUtilsLoader:
                                   synchformer=synchformer,
                                   enable_conditions=True,
                                   clip_model=clip_model)
+        feature_utils.patcher = comfy.model_patcher.ModelPatcher(feature_utils, load_device=device, offload_device=offload_device)
         return (feature_utils,)
 
 #region sampling
@@ -357,8 +360,19 @@ class MMAudioSampler:
         offload_device = mm.unet_offload_device()
         rng = torch.Generator(device=device).manual_seed(seed)
 
+        # Unpack ModelPatcher if present
+        if isinstance(mmaudio_model, comfy.model_patcher.ModelPatcher):
+            mmaudio_patcher = mmaudio_model
+            net = mmaudio_model.model
+        else:
+            mmaudio_patcher = getattr(mmaudio_model, "patcher", None)
+            net = mmaudio_model
+
+        fu_patcher = getattr(feature_utils, "patcher", None)
+        patchers_to_load = [p for p in [mmaudio_patcher, fu_patcher] if isinstance(p, comfy.model_patcher.ModelPatcher)]
+
         # 1) Fix duration in config; derive target token counts from cfg
-        seq_cfg: SequenceConfig = mmaudio_model.seq_cfg
+        seq_cfg: SequenceConfig = net.seq_cfg
         seq_cfg.duration = float(duration)
 
         target_clip_tokens = int(seq_cfg.clip_seq_len)   # e.g., 64 for 8s, 80 for 10s
@@ -391,7 +405,7 @@ class MMAudioSampler:
             sync_frames = None
 
         # 3) Update model to EXPECT these token lengths
-        mmaudio_model.update_seq_lengths(
+        net.update_seq_lengths(
             seq_cfg.latent_seq_len,      # audio latents (comes from audio cfg/rate)
             target_clip_tokens,          # CLIP tokens
             target_sync_tokens           # SYNC tokens
@@ -399,9 +413,12 @@ class MMAudioSampler:
 
         # 4) Scheduler + JIT device placement with ComfyUI memory preparation
         scheduler = FlowMatching(min_sigma=0, inference_mode='euler', num_steps=steps)
-        mm.free_memory(2000 * 1024 * 1024, device)
-        feature_utils.to(device)
-        mmaudio_model.to(device)
+        if patchers_to_load:
+            mm.load_models_gpu(patchers_to_load)
+        else:
+            mm.free_memory(2000 * 1024 * 1024, device)
+            feature_utils.to(device)
+            net.to(device)
 
         try:
             # 5) Generate
@@ -411,7 +428,7 @@ class MMAudioSampler:
                 [prompt],
                 negative_text=[negative_prompt],
                 feature_utils=feature_utils,
-                net=mmaudio_model,
+                net=net,
                 fm=scheduler,
                 rng=rng,
                 cfg_strength=cfg,
@@ -419,8 +436,16 @@ class MMAudioSampler:
         finally:
             # 6) Automatic Offload based on ComfyUI's vram_state (offloads unless HIGH_VRAM is forced)
             if mm.vram_state != mm.VRAMState.HIGH_VRAM:
-                mmaudio_model.to(offload_device)
-                feature_utils.to(offload_device)
+                if patchers_to_load:
+                    for p in patchers_to_load:
+                        p.model.to(p.offload_device)
+                        # Reset tracking counter so load_models_gpu reloads properly on next call.
+                        # Without this, partially_load() sees model_loaded_weight_memory > 0 and
+                        # returns early thinking the model is already on GPU.
+                        p.model.model_loaded_weight_memory = 0
+                else:
+                    net.to(offload_device)
+                    feature_utils.to(offload_device)
                 mm.soft_empty_cache()
 
         waveform = audios.float().cpu()
