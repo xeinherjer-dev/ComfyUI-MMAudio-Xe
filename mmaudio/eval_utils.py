@@ -38,18 +38,20 @@ def generate(clip_video: Optional[torch.Tensor],
              fm: FlowMatching,
              rng: torch.Generator,
              cfg_strength: float):
-    device = feature_utils.device
-    dtype = feature_utils.dtype
+    fu_device = feature_utils.device
+    fu_dtype = feature_utils.dtype
+    net_device = net.device
+    net_dtype = net.dtype
 
     bs = len(text)
     if clip_video is not None:
-        clip_video = clip_video.to(device, dtype, non_blocking=True)
+        clip_video = clip_video.to(fu_device, fu_dtype, non_blocking=True)
         clip_features = feature_utils.encode_video_with_clip(clip_video, batch_size=bs)
     else:
         clip_features = net.get_empty_clip_sequence(bs)
 
     if sync_video is not None:
-        sync_video = sync_video.to(device, dtype, non_blocking=True)
+        sync_video = sync_video.to(fu_device, fu_dtype, non_blocking=True)
         sync_features = feature_utils.encode_video_with_sync(sync_video, batch_size=bs)
     else:
         sync_features = net.get_empty_sync_sequence(bs)
@@ -68,8 +70,8 @@ def generate(clip_video: Optional[torch.Tensor],
     x0 = torch.randn(bs,
                      net.latent_seq_len,
                      net.latent_dim,
-                     device=device,
-                     dtype=dtype,
+                     device=net_device,
+                     dtype=net_dtype,
                      generator=rng)
     preprocessed_conditions = net.preprocess_conditions(clip_features, sync_features, text_features)
     empty_conditions = net.get_empty_conditions(
@@ -79,6 +81,6 @@ def generate(clip_video: Optional[torch.Tensor],
                                                    cfg_strength)
     x1 = fm.to_data(cfg_ode_wrapper, x0)
     x1 = net.unnormalize(x1)
-    spec = feature_utils.decode(x1)
+    spec = feature_utils.decode(x1.to(device=fu_device, dtype=fu_dtype))
     audio = feature_utils.vocode(spec)
     return audio

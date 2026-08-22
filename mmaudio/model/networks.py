@@ -226,6 +226,12 @@ class MMAudio(nn.Module):
         cache computations that do not depend on the latent/time step
         i.e., the features are reused over steps during inference
         """
+        device = self.sync_pos_emb.device
+        dtype = self.sync_pos_emb.dtype
+        clip_f = clip_f.to(device=device, dtype=dtype)
+        sync_f = sync_f.to(device=device, dtype=dtype)
+        text_f = text_f.to(device=device, dtype=dtype)
+
         assert clip_f.shape[1] == self._clip_seq_len, f'{clip_f.shape=} {self._clip_seq_len=}'
         assert sync_f.shape[1] == self._sync_seq_len, f'{sync_f.shape=} {self._sync_seq_len=}'
         assert text_f.shape[1] == self._text_seq_len, f'{text_f.shape=} {self._text_seq_len=}'
@@ -354,6 +360,14 @@ class MMAudio(nn.Module):
 
     @device.setter
     def device(self, value):
+        pass
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.latent_mean.dtype
+
+    @dtype.setter
+    def dtype(self, value):
         pass
 
     @property
